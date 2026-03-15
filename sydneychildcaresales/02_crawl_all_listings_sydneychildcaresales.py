@@ -5,7 +5,7 @@ Collect every detail-page URL from both galleries:
   - For-sale: /for-sale-gallery/
   - Sold:     /sold-gallery/
 
-Output: data/listing_urls.json
+Output: data/listing_urls_sydneychildcaresales.json
 
 Pagination: /page/N/ suffix (WordPress default)
 """
@@ -14,8 +14,12 @@ import asyncio
 import os
 import json
 import re
+import sys
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 from bs4 import BeautifulSoup
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from dedup import DedupChecker
 
 os.makedirs("data", exist_ok=True)
 
@@ -269,8 +273,14 @@ async def main():
             unique[lst["url"]] = lst
     result = list(unique.values())
 
+    # Dedup against master database
+    checker = DedupChecker()
+    result = checker.filter_listings(
+        result, source="sydneychildcaresales", log_dir="data"
+    )
+
     # Save
-    output_path = "data/listing_urls.json"
+    output_path = "data/listing_urls_sydneychildcaresales.json"
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2, ensure_ascii=False)
 

@@ -20,14 +20,18 @@ HTML structure:
     - .listing-info > h5.listing-location → location
     - .listing-info text → places, sale type
 
-Output: data/listing_urls.json
+Output: data/listing_urls_lilleychildcaresales.json
 """
 
 import asyncio
 import json
 import os
 import re
+import sys
 from bs4 import BeautifulSoup
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from dedup import DedupChecker
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 
 os.makedirs("data", exist_ok=True)
@@ -308,8 +312,15 @@ async def main():
         else:
             print(f"  FAILED: {result.error_message}")
 
+    # Dedup against master database (lilley has no URLs — match by code)
+    checker = DedupChecker()
+    all_listings = checker.filter_listings(
+        all_listings, source="lilleychildcaresales",
+        code_key="code", log_dir="data"
+    )
+
     # Save
-    output_path = "data/listing_urls.json"
+    output_path = "data/listing_urls_lilleychildcaresales.json"
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(all_listings, f, indent=2, ensure_ascii=False)
 

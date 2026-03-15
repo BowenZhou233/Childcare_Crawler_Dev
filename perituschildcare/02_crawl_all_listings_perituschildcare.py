@@ -8,13 +8,17 @@ Categories:
   - 72: Under Contract
   - 73: Sold Listings
 
-Output: data/listing_urls.json
+Output: data/listing_urls_perituschildcare.json
 """
 
 import json
 import os
+import sys
 import time
 import requests
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from dedup import DedupChecker
 
 os.makedirs("data", exist_ok=True)
 
@@ -108,8 +112,14 @@ def main():
             unique[lst["url"]] = lst
     result = list(unique.values())
 
+    # Dedup against master database
+    checker = DedupChecker()
+    result = checker.filter_listings(
+        result, source="perituschildcare", log_dir="data"
+    )
+
     # Save
-    output_path = "data/listing_urls.json"
+    output_path = "data/listing_urls_perituschildcare.json"
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2, ensure_ascii=False)
 

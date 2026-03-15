@@ -5,13 +5,17 @@ Since lilleyccs.com has no individual detail pages, all data was already
 extracted in step 2. This script transforms raw data into the standard
 column format used across all crawlers.
 
-Input:  data/listing_urls.json
-Output: data/childcare_raw.json
+Input:  data/listing_urls_lilleychildcaresales.json
+Output: data/childcare_raw_lilleychildcaresales.json
 """
 
 import os
 import json
 import re
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from dedup import DedupChecker
 
 os.makedirs("data", exist_ok=True)
 
@@ -270,15 +274,22 @@ def map_to_columns(raw: dict) -> dict:
 
 
 def main():
-    input_path  = "data/listing_urls.json"
-    output_path = "data/childcare_raw.json"
+    input_path  = "data/listing_urls_lilleychildcaresales.json"
+    output_path = "data/childcare_raw_lilleychildcaresales.json"
 
     if not os.path.exists(input_path):
-        print(f"ERROR: {input_path} not found. Run 02_crawl_all_listings.py first.")
+        print(f"ERROR: {input_path} not found. Run 02_crawl_all_listings_lilleychildcaresales.py first.")
         return
 
     with open(input_path, encoding="utf-8") as f:
         raw_listings = json.load(f)
+
+    # Dedup against master database (lilley has no URLs — match by code)
+    checker = DedupChecker()
+    raw_listings = checker.filter_extract_listings(
+        raw_listings, source="lilleychildcaresales",
+        code_key="code", log_dir="data"
+    )
 
     print("=" * 65)
     print(f"  LilleyCCS.com - Map Data to Standard Columns")

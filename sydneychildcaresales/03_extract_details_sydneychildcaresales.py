@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Step 3: For each listing URL, fetch detail page and extract all fields.
-Input:  data/listing_urls.json
-Output: data/childcare_raw.json  (one dict per listing)
+Input:  data/listing_urls_sydneychildcaresales.json
+Output: data/childcare_raw_sydneychildcaresales.json  (one dict per listing)
 
 Site: sydneychildcaresales.com.au (WordPress + Elementor)
 Field extraction strategy:
@@ -16,9 +16,13 @@ import asyncio
 import os
 import json
 import re
+import sys
 import time
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 from bs4 import BeautifulSoup
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from dedup import DedupChecker
 
 os.makedirs("data", exist_ok=True)
 
@@ -675,9 +679,9 @@ async def process_batch(crawler, batch: list[dict]) -> tuple[list[dict], list[st
 
 
 async def main():
-    urls_path = "data/listing_urls.json"
+    urls_path = "data/listing_urls_sydneychildcaresales.json"
     if not os.path.exists(urls_path):
-        print(f"ERROR: {urls_path} not found. Run 02_crawl_all_listings.py first.")
+        print(f"ERROR: {urls_path} not found. Run 02_crawl_all_listings_sydneychildcaresales.py first.")
         return
 
     with open(urls_path, encoding="utf-8") as f:
@@ -691,8 +695,8 @@ async def main():
     print("=" * 65)
 
     # Load existing progress
-    output_path   = "data/childcare_raw.json"
-    filtered_path = "data/date_filtered_urls.json"
+    output_path   = "data/childcare_raw_sydneychildcaresales.json"
+    filtered_path = "data/date_filtered_urls_sydneychildcaresales.json"
     done_urls = set()
     all_records = []
 
@@ -711,6 +715,12 @@ async def main():
           f"({len(all_records)} kept, {len(all_filtered_urls)} filtered).")
 
     remaining = [l for l in listings if l["url"] not in done_urls]
+
+    # Dedup against master database (second-pass safety net)
+    checker = DedupChecker()
+    remaining = checker.filter_extract_listings(
+        remaining, source="sydneychildcaresales", log_dir="data"
+    )
     print(f"  Remaining: {len(remaining)}")
 
     async with AsyncWebCrawler(config=BROWSER_CFG) as crawler:

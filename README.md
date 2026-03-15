@@ -85,10 +85,49 @@ python 04_export.py               # generate Excel + CSV
 
 Output files are written to each scraper's `data/` directory.
 
+## Deduplication Module
+
+A shared deduplication module (`dedup.py`) prevents re-crawling listings that already exist in the master database spreadsheet (`0.final data leasehold & freehold.xlsx`).
+
+### How It Works
+
+The module is integrated into both **Step 2** (URL collection) and **Step 3** (detail extraction) of every scraper, providing two layers of dedup:
+
+| Priority | Strategy | Description |
+|----------|----------|-------------|
+| 1 | **URL match** | Normalised URL comparison (strips protocol, `www.`, trailing `/`) |
+| 2 | **Title match** | Data Source + normalised title combo (strips punctuation, collapses whitespace) |
+| 3 | **Code match** | Data Source + listing code (for lilleychildcaresales which has no unique URLs) |
+
+### Skip Log
+
+Skipped listings are logged to `data/dedup_skipped.json` in each scraper directory for verification. Each entry includes:
+- All original listing fields
+- `_dedup_reason`: `url_match`, `title_match`, or `code_match`
+- `_dedup_time`: timestamp of when the record was skipped
+
+### Configuration
+
+- The module automatically loads the master Excel file from the project root
+- If the Excel file is missing, dedup is silently disabled (crawlers run normally)
+- No manual configuration needed — just keep the master spreadsheet in `Crawler_dev/`
+
+### Data Source Mapping
+
+| Crawler | Excel `Data Source` value | Crawler `Data Source` value |
+|---------|--------------------------|----------------------------|
+| anybusiness | `anybusiness` | `Anybusiness.com.au` |
+| businessforsale | `businessforsale` | `BusinessForSale.com.au` |
+| lilleychildcaresales | `lilleychildcaresales` | `LilleyCCS.com` |
+| perituschildcare | `perituschildcare` | `PeritusChildcare.com.au` |
+| sydneychildcaresales | `sydneychildcaresales` | `SydneyChildcareSales.com.au` |
+
 ## Project Structure
 
 ```
 Crawler_dev/
+├── dedup.py                  # Shared deduplication module
+├── 0.final data leasehold & freehold.xlsx  # Master database spreadsheet
 ├── anybusiness/              # anybusiness.com.au scraper
 │   ├── 01_fetch_html.py
 │   ├── 02_crawl_all_listings.py
@@ -96,6 +135,7 @@ Crawler_dev/
 │   ├── 04_export.py
 │   ├── run_all.py
 │   ├── data/                 # output data (gitignored)
+│   │   └── dedup_skipped.json  # skipped listings log
 │   └── html_output/          # debug HTML/screenshots (gitignored)
 ├── businessforsale/          # businessforsale.com.au scraper
 │   └── (same structure)

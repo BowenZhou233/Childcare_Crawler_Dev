@@ -2,7 +2,7 @@
 """
 Step 2: Crawl ALL childcare listing pages (active + sold)
 Collect every detail-page URL and save to:
-  data/listing_urls.json
+  data/listing_urls_anybusiness.json
 
 Stats:
   Active: /child-care-for-sale          → ~133 listings, 25/page
@@ -14,9 +14,13 @@ import os
 import json
 import re
 import math
+import sys
 import time
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 from bs4 import BeautifulSoup
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from dedup import DedupChecker
 
 os.makedirs("data", exist_ok=True)
 
@@ -180,8 +184,14 @@ async def main():
     unique = {lst["url"]: lst for lst in all_listings}
     result = list(unique.values())
 
+    # Dedup against master database
+    checker = DedupChecker()
+    result = checker.filter_listings(
+        result, source="anybusiness", log_dir="data"
+    )
+
     # Save
-    output_path = "data/listing_urls.json"
+    output_path = "data/listing_urls_anybusiness.json"
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2, ensure_ascii=False)
 

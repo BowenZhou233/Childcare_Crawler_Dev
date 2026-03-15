@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Step 3: For each listing, fetch content via WP REST API and extract all fields.
-Input:  data/listing_urls.json
-Output: data/childcare_raw.json  (one dict per listing)
+Input:  data/listing_urls_perituschildcare.json
+Output: data/childcare_raw_perituschildcare.json  (one dict per listing)
 
 Site: perituschildcare.com.au (WordPress + Uncode theme)
 Data source: WP REST API content.rendered + title.rendered
@@ -15,9 +15,13 @@ Field extraction strategy:
 import os
 import json
 import re
+import sys
 import time
 import requests
 from bs4 import BeautifulSoup
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from dedup import DedupChecker
 
 os.makedirs("data", exist_ok=True)
 
@@ -727,9 +731,9 @@ def fetch_post_content(post_id: int) -> str:
 
 
 def main():
-    urls_path = "data/listing_urls.json"
+    urls_path = "data/listing_urls_perituschildcare.json"
     if not os.path.exists(urls_path):
-        print(f"ERROR: {urls_path} not found. Run 02_crawl_all_listings.py first.")
+        print(f"ERROR: {urls_path} not found. Run 02_crawl_all_listings_perituschildcare.py first.")
         return
 
     with open(urls_path, encoding="utf-8") as f:
@@ -743,8 +747,8 @@ def main():
     print("=" * 65)
 
     # Load existing progress
-    output_path   = "data/childcare_raw.json"
-    filtered_path = "data/date_filtered_urls.json"
+    output_path   = "data/childcare_raw_perituschildcare.json"
+    filtered_path = "data/date_filtered_urls_perituschildcare.json"
     done_urls = set()
     all_records = []
 
@@ -763,6 +767,12 @@ def main():
           f"({len(all_records)} kept, {len(all_filtered_urls)} filtered).")
 
     remaining = [l for l in listings if l["url"] not in done_urls]
+
+    # Dedup against master database (second-pass safety net)
+    checker = DedupChecker()
+    remaining = checker.filter_extract_listings(
+        remaining, source="perituschildcare", log_dir="data"
+    )
     print(f"  Remaining: {len(remaining)}")
 
     for i, item in enumerate(remaining):

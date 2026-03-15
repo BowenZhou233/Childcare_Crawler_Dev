@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Step 4: Export childcare_raw.json -> childcare_data.xlsx and childcare_data.csv
-Input:  data/childcare_raw.json
+Step 4: Export childcare_raw_businessforsale.json → childcare_data.xlsx and childcare_data.csv
+Input:  data/childcare_raw_businessforsale.json
 Output: data/childcare_data.xlsx
         data/childcare_data.csv
 """
@@ -95,7 +95,7 @@ def export_csv(records: list[dict], path: str):
         writer = csv.DictWriter(f, fieldnames=COLUMNS)
         writer.writeheader()
         writer.writerows(records)
-    print(f"  CSV  -> {path}  ({len(records)} rows)")
+    print(f"  📄 CSV  → {path}  ({len(records)} rows)")
 
 
 def export_excel(records: list[dict], path: str):
@@ -104,7 +104,7 @@ def export_excel(records: list[dict], path: str):
         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
         from openpyxl.utils import get_column_letter
     except ImportError:
-        print("  openpyxl not installed. Installing...")
+        print("  ⚠️ openpyxl not installed. Installing...")
         import subprocess, sys
         subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl", "-q"])
         import openpyxl
@@ -161,7 +161,7 @@ def export_excel(records: list[dict], path: str):
     col_widths = {
         "Business No.": 14,
         "Date of Listing": 16,
-        "Data Source": 26,
+        "Data Source": 22,
         "Related Source Item": 18,
         "URL": 50,
         "Suburb": 16,
@@ -180,47 +180,39 @@ def export_excel(records: list[dict], path: str):
         ws.column_dimensions[get_column_letter(col_idx)].width = width
 
     wb.save(path)
-    print(f"  Excel -> {path}  ({len(records)} rows, {len(COLUMNS)} columns)")
+    print(f"  📊 Excel → {path}  ({len(records)} rows, {len(COLUMNS)} columns)")
 
 
 def print_summary(records: list[dict]):
     total   = len(records)
     active  = sum(1 for r in records if r.get("On Sale or Not", "").lower() == "active")
     sold    = sum(1 for r in records if r.get("On Sale or Not", "").lower() == "sold")
-    under   = sum(1 for r in records if "under" in r.get("On Sale or Not", "").lower())
     w_price = sum(1 for r in records if r.get("Price", ""))
     w_rev   = sum(1 for r in records if r.get("Revenue", ""))
-    w_place = sum(1 for r in records if r.get("Place", ""))
-    w_occ   = sum(1 for r in records if r.get("Current Occupancy", ""))
     w_nqs   = sum(1 for r in records if r.get("NQS Rating", ""))
     w_fee   = sum(1 for r in records if r.get("Current Daily Fees", ""))
-    w_lease = sum(1 for r in records if r.get("Leasehold or Freehold", ""))
 
     print(f"\n  Summary:")
-    print(f"    Total records      : {total}")
-    print(f"    Active             : {active}")
-    print(f"    Sold               : {sold}")
-    print(f"    Under Offer        : {under}")
-    print(f"    Has Price          : {w_price}")
-    print(f"    Has Revenue        : {w_rev}")
-    print(f"    Has Places         : {w_place}")
-    print(f"    Has Occupancy      : {w_occ}")
-    print(f"    Has NQS Rating     : {w_nqs}")
-    print(f"    Has Daily Fee      : {w_fee}")
-    print(f"    Has Lease/Freehold : {w_lease}")
+    print(f"    Total records   : {total}")
+    print(f"    Active          : {active}")
+    print(f"    Sold            : {sold}")
+    print(f"    Has Price       : {w_price}")
+    print(f"    Has Revenue     : {w_rev}")
+    print(f"    Has NQS Rating  : {w_nqs}")
+    print(f"    Has Daily Fee   : {w_fee}")
 
 
 def main():
-    input_path  = "data/childcare_raw.json"
-    csv_path    = "data/childcare_data_sydneychildcaresales.csv"
-    excel_path  = "data/childcare_data_sydneychildcaresales.xlsx"
+    input_path  = "data/childcare_raw_businessforsale.json"
+    csv_path    = "data/childcare_data_businessforsale.csv"
+    excel_path  = "data/childcare_data_businessforsale.xlsx"
 
     if not os.path.exists(input_path):
-        print(f"ERROR: {input_path} not found. Run 03_extract_details.py first.")
+        print(f"❌ {input_path} not found. Run 03_extract_details_businessforsale.py first.")
         return
 
     print("=" * 65)
-    print("  SydneyChildcareSales.com.au - Export Data")
+    print("  BusinessForSale.com.au — Export Data")
     print("=" * 65)
 
     records = load_data(input_path)
@@ -230,7 +222,7 @@ def main():
     export_csv(records, csv_path)
     export_excel(records, excel_path)
 
-    print("\n  Export complete!")
+    print("\n  ✅ Export complete!")
     print("=" * 65)
 
 

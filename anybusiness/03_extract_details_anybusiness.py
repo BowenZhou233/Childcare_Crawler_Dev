@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 Step 3: For each listing URL, fetch detail page and extract all fields.
-Input:  data/listing_urls.json
-Output: data/childcare_raw.json  (one dict per listing)
+Input:  data/listing_urls_anybusiness.json
+Output: data/childcare_raw_anybusiness.json  (one dict per listing)
 
 Field extraction strategy:
-  - Structured HTML fields → CSS selectors (to be refined after HTML analysis)
-  - Description-text fields → regex patterns (reused from anybusiness)
+  - Structured HTML fields → CSS selectors / itemprop
+  - Description-text fields → regex patterns
   - Empty if not found (never skip the column)
 """
 
@@ -14,9 +14,13 @@ import asyncio
 import os
 import json
 import re
+import sys
 import time
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 from bs4 import BeautifulSoup
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from dedup import DedupChecker
 
 os.makedirs("data", exist_ok=True)
 
@@ -34,7 +38,7 @@ BROWSER_CFG = BrowserConfig(
 CRAWLER_CFG = CrawlerRunConfig(
     cache_mode=CacheMode.BYPASS,
     page_timeout=45000,
-    delay_before_return_html=3.0,
+    delay_before_return_html=2.0,
     remove_overlay_elements=True,
 )
 
@@ -43,12 +47,12 @@ CONCURRENCY = 3      # parallel crawls
 PROGRESS_SAVE = 10   # save progress every N listings
 
 # ── Date filter ──────────────────────────────────────────────────────────────
-# Only keep records whose date falls within this range (inclusive).
+# Only keep records whose "Updated on" date falls within this range (inclusive).
 # Format: DD/MM/YYYY.  Set to None to disable the bound.
 DATE_FROM = "01/01/2025"   # None = no lower bound
-DATE_TO   = None           # None = no upper bound
+DATE_TO   = "12/03/2026"   # None = no upper bound
 
-# ── All target columns (same as anybusiness) ─────────────────────────────────
+# ── All target columns ────────────────────────────────────────────────────────
 COLUMNS = [
     "Business No.",
     "Date of Listing",
@@ -133,10 +137,11 @@ def rx_any(patterns: list, text: str) -> str:
 
 
 def clean_money(s: str) -> str:
-    """Normalise money strings."""
+    """Normalise money strings like '$1,500,000' → '$1,500,000'."""
     s = s.strip()
     if not s:
         return ""
+    # Remove trailing punctuation
     s = re.sub(r"[.,;:]+$", "", s)
     return s
 
@@ -151,122 +156,81 @@ def _parse_date(dmy: str):
         return None
 
 
-def _parse_date_various(text: str):
-    """Try to parse dates in various formats: DD/MM/YYYY, DD MMM YYYY, etc."""
-    from datetime import date as _date, datetime
-    text = text.strip()
-
-    # DD/MM/YYYY
-    d = _parse_date(text)
-    if d:
-        return d
-
-    # DD Mon YYYY or DD Month YYYY (e.g. "14 Mar 2026")
-    for fmt in ["%d %b %Y", "%d %B %Y", "%d-%b-%Y", "%d-%B-%Y",
-                "%b %d, %Y", "%B %d, %Y", "%Y-%m-%d"]:
-        try:
-            return datetime.strptime(text, fmt).date()
-        except ValueError:
-            continue
-    return None
-
-
 _DATE_FROM = _parse_date(DATE_FROM) if DATE_FROM else None
 _DATE_TO   = _parse_date(DATE_TO)   if DATE_TO   else None
 
 
 # ── Main extractor ────────────────────────────────────────────────────────────
-def extract(url: str, html: str) -> dict:
-    """
-    Extract all 63 fields from a detail page.
-
-    Confirmed CSS structure (from 01_fetch_html.py analysis):
-      Title:       h1
-      Price:       strong.price (inside div.price, "Asking Price $X")
-      Revenue:     label "Revenue" near price block
-      Profit:      label "Profit" near price block
-      Client No:   div.client-info → "Client No: X"
-      Last Updated: span.updated-text → "Last Updated DD Mon YYYY"
-      Category:    span.category (multiple)
-      Location:    breadcrumb links /for-sale/{state}/ and /for-sale/{city}-{state}-{postcode}/
-      Description: div[itemprop="description"] or About section text
-    """
+def extract(url: str, html: str, source_type: str) -> dict:
     soup = BeautifulSoup(html, "html.parser")
     data = {col: "" for col in COLUMNS}
 
     # ── Fixed metadata ──────────────────────────────────────────────────────
-    data["Data Source"] = "BusinessForSale.com.au"
+    data["Data Source"] = "Anybusiness.com.au"
     data["URL"]         = url
 
-    # ── Business ID ──────────────────────────────────────────────────────────
-    # From URL slug: /australia/{ID}/{slug}
-    id_match = re.search(r"/australia/([^/]+)/", url)
-    url_id = id_match.group(1) if id_match else ""
-
-    # From page: "Client No: X"
-    client_info = soup.select_one("div.client-info")
-    client_text = client_info.get_text(" ", strip=True) if client_info else ""
-    client_no = rx(r"Client\s+No[:\s]+(\S+)", client_text)
-    data["Business No."] = client_no or url_id
-
-    # ── Full page text ───────────────────────────────────────────────────────
-    page_text = soup.get_text(" ", strip=True)
-
-    # ── Title ─────────────────────────────────────────────────────────────────
-    title_el = soup.select_one("h1")
+    # ── Title (used for Related Source Item) ────────────────────────────────
+    title_el = soup.select_one('[itemprop="name"] h1') or soup.select_one("h1")
     title = title_el.get_text(strip=True) if title_el else ""
     data["Related Source Item"] = title
 
-    # ── Price ─────────────────────────────────────────────────────────────────
-    # strong.price contains the actual price text
-    price_el = soup.select_one("strong.price")
-    if price_el:
-        raw_price = price_el.get_text(strip=True)
-        # Extract dollar amount: "$1,490,000", "$15,000 WIWO, EOI", etc.
-        pm = re.search(r"\$([\d,]+(?:\.\d+)?(?:\s*[MKmk])?)", raw_price)
-        if pm:
-            data["Price"] = "$" + pm.group(1)
-        elif "contact" in raw_price.lower() or "refer" in raw_price.lower():
-            data["Price"] = "Contact Seller"
-        elif "wanted" in raw_price.lower():
-            data["Price"] = "Wanted"
-        elif "expression" in raw_price.lower():
-            data["Price"] = "Expressions of Interest"
-        else:
-            data["Price"] = raw_price
-    elif "contact seller" in page_text.lower():
-        data["Price"] = "Contact Seller"
+    # ── Business No. ───────────────────────────────────────────────────────
+    sn = soup.select_one('[itemprop="serialNumber"]')
+    data["Business No."] = sn.get_text(strip=True) if sn else rx(r"/listings/[^/]+-(\d+)$", url)
 
-    # ── Revenue / Profit from page ───────────────────────────────────────────
-    # These appear near the price block as "Revenue $X" or "Revenue Ask the Seller"
-    rev_text = rx(r"Revenue\s*\$([\d,]+(?:\.\d+)?(?:\s*[MKmk])?)", page_text)
-    if rev_text:
-        data["Revenue"] = "$" + rev_text
+    # ── Status / Sold ───────────────────────────────────────────────────────
+    # Active:      <div class="current">Active</div>
+    # Sold:        text "SOLD" in description
+    # Under Offer: <div class="under-contract">Under Offer</div>
+    status_el = (
+        soup.select_one(".current") or
+        soup.select_one(".under-contract")
+    )
+    status_text = status_el.get_text(strip=True) if status_el else ""
 
-    profit_text = rx(r"Profit\s*\$([\d,]+(?:\.\d+)?(?:\s*[MKmk])?)", page_text)
-    if profit_text:
-        data["Net Income"] = "$" + profit_text
+    page_text = soup.get_text(" ", strip=True)
 
-    # ── Date of Listing ──────────────────────────────────────────────────────
-    # span.updated-text → "Last Updated 21 Feb 2026"
-    updated_el = soup.select_one("span.updated-text")
-    if updated_el:
-        date_text = rx(r"Last\s+Updated\s+(\d{1,2}\s+\w+\s+\d{4})", updated_el.get_text(strip=True))
-        if date_text:
-            parsed = _parse_date_various(date_text)
-            if parsed:
-                data["Date of Listing"] = parsed.strftime("%d/%m/%Y")
-
-    # Fallback: search page text
-    if not data["Date of Listing"]:
-        date_text = rx_any([
-            r"Last\s+Updated\s+(\d{1,2}\s+\w+\s+\d{4})",
-            r"Listed[:\s]+(\d{1,2}\s+\w+\s+\d{4})",
+    if "under offer" in status_text.lower() or "under-contract" in str(status_el):
+        data["On Sale or Not"] = "Under Offer"
+    elif "SOLD" in page_text.upper() and "active" not in status_text.lower():
+        data["On Sale or Not"] = "Sold"
+        # Try to find sold date from description
+        sold_date = rx_any([
+            r"sold\s+(?:on|dated?|in)\s+([\w\s,/\-]+\d{4})",
+            r"settlement\s+(?:date\s*:?\s*)?([\w\s,/\-]+\d{4})",
         ], page_text)
-        if date_text:
-            parsed = _parse_date_various(date_text)
-            if parsed:
-                data["Date of Listing"] = parsed.strftime("%d/%m/%Y")
+        data["Sold Date"] = sold_date
+    else:
+        # Fallback: parse "Status: X" label directly from offer block text
+        status_label = rx(r"Status:\s*(Sold|Active|Under\s+Offer)", page_text)
+        if status_label:
+            sl = status_label.strip().lower()
+            if "under" in sl:
+                data["On Sale or Not"] = "Under Offer"
+            elif "sold" in sl:
+                data["On Sale or Not"] = "Sold"
+            else:
+                data["On Sale or Not"] = "Active"
+        else:
+            data["On Sale or Not"] = "Active"
+
+    # ── Price ───────────────────────────────────────────────────────────────
+    price_el = soup.select_one('[itemprop="price"]')
+    if price_el:
+        data["Price"] = clean_money(price_el.get_text(strip=True))
+    else:
+        # Fallback: look for "Price:" label in offer block
+        for div in soup.select(".uk-flex"):
+            t = div.get_text(" ", strip=True)
+            if "Price:" in t and "$" in t:
+                data["Price"] = clean_money(rx(r"Price:\s*(\$[\d,]+\+?)", t))
+                break
+
+    # ── Date of Listing (Updated on) ───────────────────────────────────────
+    offer_block = soup.select_one('[itemtype*="schema.org/Offer"]')
+    if offer_block:
+        text = offer_block.get_text(" ", strip=True)
+        data["Date of Listing"] = rx(r"Updated\s+on:\s*([\d/]+)", text)
 
     # ── Date filter ─────────────────────────────────────────────────────────
     if data["Date of Listing"] and (_DATE_FROM or _DATE_TO):
@@ -274,87 +238,37 @@ def extract(url: str, html: str) -> dict:
         if listing_date:
             if _DATE_FROM and listing_date < _DATE_FROM:
                 return None  # too old
-            if _DATE_TO and listing_date > _DATE_TO:
+            if _DATE_TO   and listing_date > _DATE_TO:
                 return None  # too new
 
-    # ── Location from breadcrumb ─────────────────────────────────────────────
-    # Breadcrumb pattern: Business for Sale > {State} > {Region} > {City} > {Category}
-    # Location links: /for-sale/{city}-{state}-{postcode}/
-    breadcrumb = soup.select_one("ul.breadcrumb") or soup.select_one(".breadcrumb")
-    if breadcrumb:
-        crumb_links = breadcrumb.select("a")
-        crumb_texts = [a.get_text(strip=True) for a in crumb_links]
-        crumb_hrefs = [a.get("href", "") for a in crumb_links]
+    # ── Location ───────────────────────────────────────────────────────────
+    addr_el = soup.select_one('[itemprop="streetAddress"]')
+    raw_addr = addr_el.get_text(strip=True) if addr_el else ""
 
-        # Find state from breadcrumb text (e.g. "Western Australia", "New South Wales")
-        state_map = {
-            "Western Australia": "WA", "New South Wales": "NSW",
-            "Victoria": "VIC", "Queensland": "QLD",
-            "South Australia": "SA", "Tasmania": "TAS",
-            "Northern Territory": "NT", "ACT": "ACT",
-        }
-        for ct in crumb_texts:
-            for full_name, abbrev in state_map.items():
-                if ct == full_name or ct == abbrev:
-                    data["State"] = abbrev
-                    break
-            if data["State"]:
-                break
-
-        # Also try state from href: /for-sale/wa/, /for-sale/nsw/
-        if not data["State"]:
-            state_abbrevs = {"wa", "nsw", "vic", "qld", "sa", "tas", "nt", "act"}
-            for href in crumb_hrefs:
-                m = re.search(r"/for-sale/([a-z]{2,3})/?$", href)
-                if m and m.group(1) in state_abbrevs:
-                    data["State"] = m.group(1).upper()
-                    break
-
-        # Find city/suburb from breadcrumb href: /for-sale/{city}-{state}-{postcode}/
-        for href in crumb_hrefs:
-            m = re.search(r"/for-sale/([\w-]+)-([a-z]{2,3})-(\d{4})/?", href)
-            if m:
-                city = m.group(1).replace("-", " ").title()
-                data["Suburb"] = city
-                data["City"] = city
-                if not data["State"]:
-                    data["State"] = m.group(2).upper()
-                break
-
-        # Fallback: use region name from breadcrumb
-        if not data["Suburb"]:
-            for ct in crumb_texts:
-                if "Region" in ct:
-                    data["Suburb"] = ct.replace(" Region", "")
-                    data["City"] = data["Suburb"]
-                    break
-
-    # ── Status ───────────────────────────────────────────────────────────────
-    text_upper = page_text.upper()
-    if "SOLD" in text_upper and ("BUSINESS SOLD" in text_upper or "THIS LISTING HAS BEEN SOLD" in text_upper):
-        data["On Sale or Not"] = "Sold"
-    elif "UNDER OFFER" in text_upper or "UNDER CONTRACT" in text_upper:
-        data["On Sale or Not"] = "Under Offer"
+    # Parse from URL slug: /listings/{suburb}-{state}-{postcode}-...-{id}
+    slug_match = re.search(
+        r"/listings/([^/]+)-([a-z]{2,3})-(\d{4})-",
+        url, re.IGNORECASE
+    )
+    if slug_match:
+        suburb_slug = slug_match.group(1).replace("-", " ").title()
+        state_slug  = slug_match.group(2).upper()
     else:
-        data["On Sale or Not"] = "Active"
+        suburb_slug = ""
+        state_slug  = ""
+
+    data["Suburb"]  = raw_addr or suburb_slug
+    data["City"]    = raw_addr or suburb_slug  # often same as suburb for AU
+    data["State"]   = state_slug
 
     # ── Description text ───────────────────────────────────────────────────
-    # div[itemprop="description"] is present on listing cards;
-    # on detail page, look for the About section
-    desc = ""
-    for selector in ["div[itemprop='description']", ".listing-description",
-                     ".about", ".description"]:
-        desc_el = soup.select_one(selector)
-        if desc_el:
-            desc = desc_el.get_text("\n", strip=True)
-            if len(desc) > 50:  # skip short snippets
-                break
-    if not desc or len(desc) < 50:
-        # Fallback: use full page text
-        desc = page_text
+    desc_el = soup.select_one('[itemprop="description"]')
+    desc = desc_el.get_text("\n", strip=True) if desc_el else ""
     desc_lower = desc.lower()
 
     # ── Location Direction ──────────────────────────────────────────────────
+    # Extract directional region from title then description, e.g.
+    # "North-Western Victoria", "Inner West Sydney", "Eastern Suburbs"
     _AU_REGIONS = (
         r"Victoria|VIC|New South Wales|NSW|Queensland|QLD|"
         r"Western Australia|WA|South Australia|SA|"
@@ -366,6 +280,7 @@ def extract(url: str, html: str) -> dict:
         r"north(?:ern)?|south(?:ern)?|east(?:ern)?|west(?:ern)?)"
         r"(?:[- ](?:west(?:ern)?|east(?:ern)?|north(?:ern)?|south(?:ern)?))?"
     )
+    # Try title first ("in X"), then loose match in description
     loc_dir = rx_any([
         rf"\bin\s+((?:{_DIR_CORE}\s+)+(?:{_AU_REGIONS}))",
         rf"((?:{_DIR_CORE}\s+)+(?:{_AU_REGIONS}))",
@@ -376,12 +291,19 @@ def extract(url: str, html: str) -> dict:
     # ── Leasehold or Freehold ──────────────────────────────────────────────
     if "freehold" in desc_lower:
         data["Leasehold or Freehold"] = "Freehold"
-    elif "leasehold" in desc_lower or "lease" in desc_lower:
+    elif "leasehold" in desc_lower:
+        data["Leasehold or Freehold"] = "Leasehold"
+    elif "lease" in desc_lower:
         data["Leasehold or Freehold"] = "Leasehold"
 
     # ── Revenue ────────────────────────────────────────────────────────────
     def _parse_money(text: str) -> str:
-        m = re.search(r"\$([\d,.]+)\s*([MKmk](?:illion|ILLION)?)?\+?", text, re.IGNORECASE)
+        """Extract first dollar amount and normalise to $X or $XM etc."""
+        # Match: $1.2M, $1.2 million, $1,200,000, $1.2m+
+        m = re.search(
+            r"\$([\d,.]+)\s*([MKmk](?:illion|ILLION)?)?\+?",
+            text, re.IGNORECASE
+        )
         if not m:
             return ""
         num = m.group(1)
@@ -393,6 +315,7 @@ def extract(url: str, html: str) -> dict:
         return "$" + num + suffix
 
     def _find_money_near(keyword: str, text: str) -> str:
+        """Find dollar amount near a keyword (before or after, within 60 chars)."""
         for m in re.finditer(keyword, text, re.IGNORECASE):
             start = max(0, m.start() - 60)
             end   = min(len(text), m.end() + 60)
@@ -402,12 +325,11 @@ def extract(url: str, html: str) -> dict:
                 return val
         return ""
 
-    if not data["Revenue"]:
-        data["Revenue"] = _find_money_near(r"revenue|turnover", desc)
+    # ── Revenue ────────────────────────────────────────────────────────────
+    data["Revenue"] = _find_money_near(r"revenue|turnover", desc)
 
-    # ── Net Income (supplement from description if not found in page header)
-    if not data["Net Income"]:
-        data["Net Income"] = _find_money_near(r"net\s+(?:profit|income)|EBITDA", desc)
+    # ── Net Income ─────────────────────────────────────────────────────────
+    data["Net Income"] = _find_money_near(r"net\s+(?:profit|income)|EBITDA", desc)
 
     # ── EBITDA ─────────────────────────────────────────────────────────────
     ebitda_matches = re.findall(
@@ -425,8 +347,8 @@ def extract(url: str, html: str) -> dict:
         if i < len(pct_matches):
             data[col_pct] = pct_matches[i] + "%"
 
-    # ── Licensed Places (number of approved places) ─────────────────────
-    data["Place"] = rx_any([
+    # ── Current Occupancy / Licensed Places ───────────────────────────────
+    data["Current Occupancy"] = rx_any([
         r"licensed\s+(?:for\s+)?(\d+)\+?\s+(?:children|places|kids|approved)",
         r"approved\s+for\s+(\d+)\+?\s+(?:children|places)",
         r"(\d+)\+?\s+(?:approved\s+)?places",
@@ -435,17 +357,7 @@ def extract(url: str, html: str) -> dict:
         r"(\d+)\+?\s+(?:licensed\s+)?(?:children|places)\s+(?:centre|center)?",
     ], desc)
 
-    # ── Current Occupancy (percentage) ─────────────────────────────────
-    data["Current Occupancy"] = rx_any([
-        r"occupancy\s+(?:rate\s+)?(?:of\s+)?(?:approx\.?\s*)?(\d+(?:\.\d+)?)\s*%",
-        r"(\d+(?:\.\d+)?)\s*%\s+(?:current\s+)?occupancy",
-        r"currently\s+(\d+(?:\.\d+)?)\s*%\s+(?:occupied|full)",
-        r"(\d+(?:\.\d+)?)\s*%\s+(?:occupied|full|utilisation|utilization)",
-        r"running\s+at\s+(\d+(?:\.\d+)?)\s*%",
-        r"at\s+(\d+(?:\.\d+)?)\s*%\s+(?:capacity|occupancy)",
-    ], desc)
-    if data["Current Occupancy"] and "%" not in data["Current Occupancy"]:
-        data["Current Occupancy"] = data["Current Occupancy"] + "%"
+    data["Place"] = data["Current Occupancy"]  # same field in different formats
 
     # ── Waiting List ───────────────────────────────────────────────────────
     if re.search(r"waiting\s+list|waitlist|wait\s+list", desc_lower):
@@ -462,11 +374,14 @@ def extract(url: str, html: str) -> dict:
         r"daily\s+(?:fee|fees)\s+of\s+\$?([\d,]+(?:\.\d+)?)",
         r"charges?\s+over\s+\$?([\d,]+(?:\.\d+)?)\s+per\s+(?:child\s+per\s+)?day",
         r"\$?([\d,]+(?:\.\d+)?)\s*per\s+day\s*(?:per\s+child)?",
+        r"(?:fee|fees)\s+of\s+\$?([\d,]+(?:\.\d+)?)\s*/?\s*day",
     ], desc)
     if data["Current Daily Fees"] and not data["Current Daily Fees"].startswith("$"):
         data["Current Daily Fees"] = "$" + data["Current Daily Fees"]
 
     # ── Daily Fees by Age Group ────────────────────────────────────────────
+    # Pattern: "$150 (0-2), $145 (2-3), $140 (3-5)" or table-like
+    # Try to find age-specific fees
     for age_range, col_name in [("0-2", "Daily Fee (0-2)"),
                                   ("2-3", "Daily Fee (2-3)"),
                                   ("3-5", "Daily Fee (3-5)"),
@@ -484,11 +399,18 @@ def extract(url: str, html: str) -> dict:
         if v and not data[col_name]:
             data[col_name] = "$" + v
 
+    # Fall back: if we have current daily fee and no age breakdown
+    if data["Current Daily Fees"] and not data["Daily Fee (0-2)"]:
+        for col in ["Daily Fee (0-2)", "Daily Fee (2-3)", "Daily Fee (3-5)"]:
+            data[col] = ""  # leave blank – not specified
+
     # ── Rent ───────────────────────────────────────────────────────────────
     data["Rent"] = rx_any([
         r"rent\s+(?:of\s+)?(?:approx\.?\s*)?\$([\d,]+(?:\.\d+)?)(?:\s*(?:per|p\.a\.|pa|annually|a\s+year))?",
         r"\$([\d,]+(?:\.\d+)?)\s*(?:per|p\.a\.|pa)\s+(?:in\s+)?rent",
         r"(?:annual\s+)?rent[:\s]+\$([\d,]+(?:\.\d+)?)",
+        # No dollar sign format: "rent of approx. 3500"
+        r"rent\s+(?:of\s+)?(?:approx\.?\s*)([\d,]+(?:\.\d+)?)\s*(?:per|p\.a\.)?",
     ], desc)
     if data["Rent"] and not data["Rent"].startswith("$"):
         data["Rent"] = "$" + data["Rent"]
@@ -497,6 +419,8 @@ def extract(url: str, html: str) -> dict:
     data["Rent per Place"] = rx_any([
         r"\$([\d,]+(?:\.\d+)?)\s*per\s+place\s+(?:per\s+)?(?:annum|year|pa|p\.a\.)",
         r"rent\s+of\s+approx\.?\s+\$([\d,]+(?:\.\d+)?)\s+per\s+place",
+        r"rent\s+of\s+approx\.?\s+([\d,]+(?:\.\d+)?)\s+per\s+place",
+        r"per\s+place\s+(?:per\s+)?(?:annum|year|pa)[^$\n]*\$([\d,]+(?:\.\d+)?)",
     ], desc)
     if data["Rent per Place"] and not data["Rent per Place"].startswith("$"):
         data["Rent per Place"] = "$" + data["Rent per Place"]
@@ -506,7 +430,7 @@ def extract(url: str, html: str) -> dict:
         r"(\d+[\d\s]*[-+]\d*\s*year(?:s)?\s+(?:lease|term))",
         r"lease\s+(?:term\s+)?(?:of\s+)?(\d+\s+year(?:s)?)",
         r"(\d+)\s+year\s+(?:initial\s+)?lease",
-        r"long\s+(\d+\s+year)\s+lease",
+        r"long\s+(\d+\s+year)\s+lease\s+(?:term\s+)?(?:with\s+options?)",
         r"lease\s+(?:term)?\s*[:\s]+(\d+\s+years?\s+\+?\s*\d*\s*years?)",
     ], desc)
     if not data["Length of Lease"]:
@@ -517,25 +441,29 @@ def extract(url: str, html: str) -> dict:
         r"(\d+(?:\.\d+)?)\s*%\s+(?:annual\s+)?(?:rent\s+)?(?:increase|review|CPI)",
         r"(?:annual\s+)?(?:rent\s+)?(?:increase|review)[^\d%]*(\d+(?:\.\d+)?)\s*%",
         r"CPI[^\d]*(\d+(?:\.\d+)?)\s*%",
+        r"rent\s+increases?\s+(?:of\s+)?(\d+(?:\.\d+)?)\s*%",
     ], desc)
 
     # ── Area sqm ───────────────────────────────────────────────────────────
     data["Area (sqm)"] = rx_any([
         r"(\d[\d,]*)\s*(?:square\s+metres?|sqm|m²|m2)",
+        r"(\d[\d,]*)\s*(?:sqm|m²|m2)\s+(?:of\s+)?(?:floor\s+)?(?:space|area)",
     ], desc)
 
     # ── Near School ────────────────────────────────────────────────────────
     sch = rx_any([
-        r"(\d+(?:\.\d+)?)\s*(?:km|m)\s*(?:from|of)?\s*(?:\w+\s+)?school",
-        r"school[^.]*?(\d+(?:\.\d+)?)\s*(?:km|m)",
+        r"(\d+(?:\.\d+)?)\s*(?:km|m|metres?|meters?)\s*(?:from|away from|of)?\s*(?:\w+\s+)?(?:primary|high|secondary)?\s*school",
+        r"(?:primary|high|secondary)?\s*school[^.]*?(\d+(?:\.\d+)?)\s*(?:km|m)",
     ], desc)
-    data["Near School"] = sch if sch else ""
+    data["Near School"] = sch + (" km" if sch and "km" not in sch.lower() and "m" not in sch.lower() else "") if sch else ""
 
     # ── Near Supermarket ───────────────────────────────────────────────────
-    data["Near Supermarket"] = rx_any([
-        r"(\d+(?:\.\d+)?)\s*(?:km|m)\s*(?:from)?\s*supermarket",
+    sm = rx_any([
+        r"(\d+(?:\.\d+)?)\s*(?:km|m)\s*(?:from)?\s*(?:\w+\s+)?supermarket",
         r"supermarket[^.]*?(\d+(?:\.\d+)?)\s*(?:km|m)",
+        r"(\d+(?:\.\d+)?)\s*(?:km|m)\s*(?:from)?\s*(?:shops?|retail|shopping)",
     ], desc)
+    data["Near Supermarket"] = sm if sm else ""
 
     # ── Renovation / Fitout ────────────────────────────────────────────────
     if re.search(r"renovate?d?|refurb|upgrade|new\s+build|purpose.built", desc_lower):
@@ -548,7 +476,7 @@ def extract(url: str, html: str) -> dict:
         r"(exceeding)\s+(?:NQS|national\s+quality)",
         r"(meeting)\s+(?:NQS|national\s+quality)",
         r"(working\s+towards)\s+(?:NQS|national\s+quality)",
-        r"NQS\s+(?:rating\s+(?:of\s+)?|rated\s+)?(exceeding|meeting|working\s+towards)",
+        r"NQS\s+(?:rating\s+(?:of\s+)?|rated\s+|assessment\s+of\s+)?(exceeding|meeting|working\s+towards)",
         r"rated\s+(exceeding|meeting|working\s+towards)",
         r"(exceeding|meeting)\s+nqs",
     ], desc)
@@ -556,14 +484,17 @@ def extract(url: str, html: str) -> dict:
 
     # ── Vehicles Passing Daily ─────────────────────────────────────────────
     data["Vehicles Passing Daily"] = rx_any([
-        r"([\d,]+)\s+(?:cars?|vehicles?)\s+(?:passing|pass)\s+(?:daily|per\s+day)",
+        r"([\d,]+)\s+(?:cars?|vehicles?)\s+(?:passing|pass)\s+(?:by\s+)?(?:daily|per\s+day|a\s+day)",
+        r"(?:daily\s+)?(?:traffic|vehicles?|cars?)\s+(?:count\s+)?(?:of\s+)?([\d,]+)\s+(?:cars?|vehicles?)?",
         r"([\d,]+)\s+(?:vehicles?|cars?)\s+per\s+day",
     ], desc)
 
     # ── Parking ────────────────────────────────────────────────────────────
     parking = rx_any([
         r"(\d+)\s+(?:car\s+)?(?:parking\s+)?(?:spaces?|bays?|spots?)",
-        r"parking\s+(?:for\s+)?(\d+)",
+        r"parking\s+(?:for\s+)?(\d+)\s+(?:cars?|vehicles?)",
+        r"onsite\s+(?:car\s+)?parking[:\s]+(\d+)",
+        r"car\s+park(?:ing)?\s+(?:for\s+)?(\d+)",
     ], desc)
     if parking:
         data["Parking Volume"] = parking + " spaces"
@@ -578,22 +509,24 @@ def extract(url: str, html: str) -> dict:
     if re.search(r"land\s+tax\s+free|exempt\s+from\s+land\s+tax", desc_lower):
         data["Land Tax Free"] = "Yes"
 
-    # ── Supply Ratio ───────────────────────────────────────────────────────
+    # ── Supply Ratio / Competition ─────────────────────────────────────────
     data["Supply Ratio"] = rx_any([
         r"(\d+(?:\.\d+)?)\s*(?:km|km\s+radius)[^\w]*(?:only\s+)?(?:childcare|centre|child\s+care)",
-        r"only\s+(?:childcare|centre)\s+within\s+(\d+(?:\.\d+)?)\s*km",
+        r"only\s+(?:childcare|centre|child\s+care)\s+within\s+(\d+(?:\.\d+)?)\s*km",
         r"no\s+(?:direct\s+)?competition[^.]*within\s+(\d+(?:\.\d+)?)\s*km",
     ], desc)
 
     # ── Demographics ───────────────────────────────────────────────────────
     data["# of Students Surrounding"] = rx_any([
         r"(\d[\d,]+)\s+children\s+aged\s+(?:0-4|0-5|under\s+5)",
+        r"market\s+of\s+([\d,]+)\s+children",
         r"([\d,]+)\s+children\s+(?:in\s+the\s+area|within)",
     ], desc)
 
     data["Resident Population"] = rx_any([
         r"population\s+(?:of\s+)?([\d,]+)",
         r"([\d,]+)\s+(?:residents?|people)\s+(?:in\s+the\s+area|within)",
+        r"suburb\s+population[:\s]+([\d,]+)",
     ], desc)
 
     data["Population Growth Rate (Per Year)"] = rx(
@@ -604,13 +537,15 @@ def extract(url: str, html: str) -> dict:
     # ── Additional Places ──────────────────────────────────────────────────
     data["Additional Places to be Added"] = rx_any([
         r"additional\s+(\d+)\s+(?:approved\s+)?places",
+        r"(?:expand|extension)\s+(?:to\s+)?(\d+)\s+(?:more\s+)?places",
         r"(\d+)\s+additional\s+(?:approved\s+)?places",
     ], desc)
 
-    # ── Development ────────────────────────────────────────────────────────
-    if re.search(r"(?:housing|residential)\s+(?:estate|development|growth)", desc_lower):
+    # ── Development nearby ─────────────────────────────────────────────────
+    if re.search(r"(?:housing|residential)\s+(?:estate|development|growth|estate)", desc_lower):
         data["Development"] = rx_any([
-            r"(\d+)\s+(?:new\s+)?(?:homes?|lots?|units?)\s+(?:being\s+)?(?:built|developed)",
+            r"(\d+)\s+(?:new\s+)?(?:homes?|blocks?|lots?|units?)\s+(?:being\s+)?(?:built|developed|under\s+construction)",
+            r"(?:housing|residential)\s+(?:estate|development)[^.]*?(\d+\s+(?:homes?|lots?|blocks?))",
         ], desc) or "Yes"
 
     # ── Leasehold/Freehold → Site ──────────────────────────────────────────
@@ -641,7 +576,9 @@ def extract(url: str, html: str) -> dict:
 
 # ── Async crawler loop ────────────────────────────────────────────────────────
 async def process_batch(crawler, batch: list[dict]) -> tuple[list[dict], list[str]]:
-    """Crawl a batch concurrently and extract data."""
+    """Crawl a batch concurrently and extract data.
+    Returns (records, date_filtered_urls).
+    """
     tasks = [crawler.arun(url=item["url"], config=CRAWLER_CFG) for item in batch]
     results_html = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -652,7 +589,7 @@ async def process_batch(crawler, batch: list[dict]) -> tuple[list[dict], list[st
             print(f"  ❌ Error {item['url']}: {res}")
             rec = {col: "" for col in COLUMNS}
             rec["URL"] = item["url"]
-            rec["Data Source"] = "BusinessForSale.com.au"
+            rec["Data Source"] = "Anybusiness.com.au"
             records.append(rec)
             continue
 
@@ -660,17 +597,17 @@ async def process_batch(crawler, batch: list[dict]) -> tuple[list[dict], list[st
             print(f"  ❌ Failed {item['url']}: {res.error_message}")
             rec = {col: "" for col in COLUMNS}
             rec["URL"] = item["url"]
-            rec["Data Source"] = "BusinessForSale.com.au"
+            rec["Data Source"] = "Anybusiness.com.au"
             records.append(rec)
             continue
 
         try:
-            rec = extract(item["url"], res.html)
+            rec = extract(item["url"], res.html, item.get("source_type", ""))
         except Exception as e:
             print(f"  ⚠️ Extract error {item['url']}: {e}")
             rec = {col: "" for col in COLUMNS}
             rec["URL"] = item["url"]
-            rec["Data Source"] = "BusinessForSale.com.au"
+            rec["Data Source"] = "Anybusiness.com.au"
 
         if rec is None:
             print(f"  ⏭ Filtered (date out of range): {item['url']}")
@@ -681,24 +618,25 @@ async def process_batch(crawler, batch: list[dict]) -> tuple[list[dict], list[st
 
 
 async def main():
-    urls_path = "data/listing_urls.json"
+    # Load listing URLs
+    urls_path = "data/listing_urls_anybusiness.json"
     if not os.path.exists(urls_path):
-        print(f"❌ {urls_path} not found. Run 02_crawl_all_listings.py first.")
+        print(f"❌ {urls_path} not found. Run 02_crawl_all_listings_anybusiness.py first.")
         return
 
     with open(urls_path, encoding="utf-8") as f:
         listings = json.load(f)
 
     print("=" * 65)
-    print(f"  BusinessForSale.com.au — Extract Detail Pages")
+    print(f"  Anybusiness Childcare — Extract Detail Pages")
     print(f"  Total listings to process: {len(listings)}")
     if _DATE_FROM or _DATE_TO:
         print(f"  Date filter: {DATE_FROM or '∞'} → {DATE_TO or '∞'}")
     print("=" * 65)
 
-    # Load existing progress
-    output_path   = "data/childcare_raw.json"
-    filtered_path = "data/date_filtered_urls.json"
+    # Load existing progress (saved records)
+    output_path   = "data/childcare_raw_anybusiness.json"
+    filtered_path = "data/date_filtered_urls_anybusiness.json"
     done_urls = set()
     all_records = []
 
@@ -707,6 +645,7 @@ async def main():
             all_records = json.load(f)
         done_urls = {r["URL"] for r in all_records}
 
+    # Also treat previously date-filtered URLs as done (avoid re-crawling)
     all_filtered_urls = []
     if os.path.exists(filtered_path):
         with open(filtered_path, encoding="utf-8") as f:
@@ -717,6 +656,12 @@ async def main():
           f"({len(all_records)} kept, {len(all_filtered_urls)} filtered).")
 
     remaining = [l for l in listings if l["url"] not in done_urls]
+
+    # Dedup against master database (second-pass safety net)
+    checker = DedupChecker()
+    remaining = checker.filter_extract_listings(
+        remaining, source="anybusiness", log_dir="data"
+    )
     print(f"  Remaining: {len(remaining)}")
 
     async with AsyncWebCrawler(config=BROWSER_CFG) as crawler:

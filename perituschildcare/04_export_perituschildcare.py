@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Step 4: Export childcare_raw.json -> childcare_data.xlsx and childcare_data.csv
-Input:  data/childcare_raw.json
+Input:  data/childcare_raw_perituschildcare.json
 Output: data/childcare_data.xlsx
         data/childcare_data.csv
 """
@@ -145,7 +145,7 @@ def export_excel(records: list[dict], path: str):
     # Write data
     for row_idx, rec in enumerate(records, start=2):
         fill = fill_even if row_idx % 2 == 0 else fill_odd
-        is_sold = rec.get("On Sale or Not", "").lower() in ("sold",)
+        is_sold = rec.get("On Sale or Not", "").lower() in ("sold", "leased")
 
         for col_idx, col_name in enumerate(COLUMNS, start=1):
             val = rec.get(col_name, "")
@@ -186,37 +186,45 @@ def export_excel(records: list[dict], path: str):
 def print_summary(records: list[dict]):
     total   = len(records)
     active  = sum(1 for r in records if r.get("On Sale or Not", "").lower() == "active")
-    sold    = sum(1 for r in records if r.get("On Sale or Not", "").lower() == "sold")
-    offer   = sum(1 for r in records if "under offer" in r.get("On Sale or Not", "").lower())
-    contract = sum(1 for r in records if "under contract" in r.get("On Sale or Not", "").lower())
+    sold    = sum(1 for r in records if r.get("On Sale or Not", "").lower() in ("sold", "leased"))
+    under   = sum(1 for r in records if "under" in r.get("On Sale or Not", "").lower())
     w_price = sum(1 for r in records if r.get("Price", ""))
+    w_rev   = sum(1 for r in records if r.get("Revenue", ""))
     w_place = sum(1 for r in records if r.get("Place", ""))
-    w_state = sum(1 for r in records if r.get("State", ""))
-    w_tenure= sum(1 for r in records if r.get("Leasehold or Freehold", ""))
+    w_occ   = sum(1 for r in records if r.get("Current Occupancy", ""))
+    w_nqs   = sum(1 for r in records if r.get("NQS Rating", ""))
+    w_fee   = sum(1 for r in records if r.get("Current Daily Fees", ""))
+    w_lease = sum(1 for r in records if r.get("Leasehold or Freehold", ""))
+    w_rent  = sum(1 for r in records if r.get("Rent", ""))
+    w_ebitda= sum(1 for r in records if r.get("Net Income", ""))
 
     print(f"\n  Summary:")
     print(f"    Total records      : {total}")
     print(f"    Active             : {active}")
-    print(f"    Under Offer        : {offer}")
-    print(f"    Under Contract     : {contract}")
-    print(f"    Sold               : {sold}")
+    print(f"    Sold/Leased        : {sold}")
+    print(f"    Under Contract     : {under}")
     print(f"    Has Price          : {w_price}")
+    print(f"    Has Revenue        : {w_rev}")
     print(f"    Has Places         : {w_place}")
-    print(f"    Has State          : {w_state}")
-    print(f"    Has Lease/Freehold : {w_tenure}")
+    print(f"    Has Occupancy      : {w_occ}")
+    print(f"    Has NQS Rating     : {w_nqs}")
+    print(f"    Has Daily Fee      : {w_fee}")
+    print(f"    Has Lease/Freehold : {w_lease}")
+    print(f"    Has Rent           : {w_rent}")
+    print(f"    Has Net Income     : {w_ebitda}")
 
 
 def main():
-    input_path  = "data/childcare_raw.json"
-    csv_path    = "data/childcare_data_lilleychildcaresales.csv"
-    excel_path  = "data/childcare_data_lilleychildcaresales.xlsx"
+    input_path  = "data/childcare_raw_perituschildcare.json"
+    csv_path    = "data/childcare_data_perituschildcare.csv"
+    excel_path  = "data/childcare_data_perituschildcare.xlsx"
 
     if not os.path.exists(input_path):
-        print(f"ERROR: {input_path} not found. Run 03_extract_details.py first.")
+        print(f"ERROR: {input_path} not found. Run 03_extract_details_perituschildcare.py first.")
         return
 
     print("=" * 65)
-    print("  LilleyCCS.com - Export Data")
+    print("  PeritusChildcare.com.au - Export Data")
     print("=" * 65)
 
     records = load_data(input_path)

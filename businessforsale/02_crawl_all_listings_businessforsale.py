@@ -2,7 +2,7 @@
 """
 Step 2: Crawl ALL childcare centre listing pages from BusinessForSale.com.au
 Collect every detail-page URL and save to:
-  data/listing_urls.json
+  data/listing_urls_businessforsale.json
 
 Search strategy:
   - Use category URL: /for-sale/education/childcare-centre/
@@ -16,8 +16,12 @@ import os
 import json
 import re
 import math
+import sys
 import time
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from dedup import DedupChecker
 from bs4 import BeautifulSoup
 
 os.makedirs("data", exist_ok=True)
@@ -233,8 +237,14 @@ async def main():
             unique[lst["url"]] = lst
     result = list(unique.values())
 
+    # Dedup against master database
+    checker = DedupChecker()
+    result = checker.filter_listings(
+        result, source="businessforsale", log_dir="data"
+    )
+
     # Save
-    output_path = "data/listing_urls.json"
+    output_path = "data/listing_urls_businessforsale.json"
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2, ensure_ascii=False)
 
